@@ -1,0 +1,212 @@
+---
+title: "cpd_models"
+output: html_document
+date: "2024-02-04"
+---
+```{r}
+library(mcp)
+
+library(tidyverse)
+library(gamlss)
+library(pscl)
+library(data.table)
+
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(zoo)
+library(lsr)
+library(epitools)
+library(magick)
+library(scales)
+library(knitr)
+library(EnvStats)
+```
+
+```{r}
+get_entropy <- function(x) {
+  return(-sum(x * log(x)))
+}
+```
+
+# offline changepoint detection (binary, Jeffrey's prior)
+```{r}
+find_bin_cp_post <- function(data) {
+  init_alpha <- 0.5
+  init_beta <- 0.5
+  n = length(data)
+  post_probs_arr = c()
+  for(i in seq(from=1, to=n-1)) {
+    before_cp_sum = sum(data[1:i])
+    after_cp_sum = sum(data[(i+1):n])
+    
+    before_cp_alpha = init_alpha + before_cp_sum
+    before_cp_beta = init_beta + i - before_cp_sum
+    
+    after_cp_alpha = init_alpha + after_cp_sum
+    after_cp_beta = init_beta + n - i - after_cp_sum
+    
+    post_prob = beta(before_cp_alpha, before_cp_beta) * beta(after_cp_alpha, after_cp_beta)
+    post_probs_arr = append(post_probs_arr, post_prob)
+  }
+  
+  post_probs_arr <- post_probs_arr / sum(post_probs_arr)
+  
+  return(post_probs_arr)
+}
+
+plot_bin_cp <- function(lake_data, correlation) {
+  
+  min_temp = min(lake_data$freeze)
+  max_temp = max(lake_data$freeze)
+  scale = max_temp - min_temp
+  
+  df<-as.data.frame(lake_data)
+  
+  cp_post = find_bin_cp_post(lake_data$freeze)
+
+  cp_post_df = data.frame(cbind(lake_data$year, cp_post))
+  
+  variance = var(cp_post)
+  # labs(title = paste("Correlation: ", correlation))
+  plot1 <- ggplot(data=df, aes(x=year, y = freeze)) + theme_bw() + geom_point(size = 3) + ylab('Lake Freeze') + 
+  scale_y_continuous(limits = c(-.05, 1.05), labels =c("     ", "     "), breaks = (0:1), expand = c(0, 0)) + theme( axis.title.y=element_blank(),axis.title.x=element_blank(), axis.text.x=element_blank(), text = element_text(size = 34), panel.border = element_rect(fill=NA, size=1.5, linetype="solid"),plot.margin = margin(10, 15, 0, 15))+ coord_cartesian(clip = "off")
+  
+  plot2 <- ggplot(data=cp_post_df, aes(x=V1, y = cp_post)) + theme_bw() + geom_line(col ='#86C3E9', size=3)  + ylab('CP Prob') + xlab(' ') + scale_y_continuous(limits=c(-0.05, .6), breaks = 0.5*(0:1), expand = c(0, 0))  + scale_x_continuous(breaks = c(1940, 1975, 2010)) + theme(text = element_text(size = 34), axis.title.y=element_blank(), panel.border = element_rect(fill=NA, size=1.5, linetype="solid"),plot.margin = margin(15, 15, 0, 15), axis.text.x = element_text(margin = margin(15,0,0,0)))+ coord_cartesian(clip = "off")
+  print(grid.arrange(plot1, plot2, nrow=2, heights=c(0.5, 0.5)))
+  
+  return(list(cp_post, variance))
+
+}
+```
+
+# offline changepoint detection (continuous, uniform prior)
+```{r}
+find_cont_cp_post <- function(data, variance) {
+  n = length(data)
+  post_probs_arr = c()
+  for(i in seq(from=1, to=n-1)) {
+    before_cp_sum = sum(data[1:i])
+    after_cp_sum = sum(data[(i+1):n])
+    squared_sum = sum(data^2)
+    
+    weight = ((2 * pi * variance)^((-(n-1)/2)))/sqrt(i * (n-i))
+    x = (-1/(2*variance))*(squared_sum - 1/i * before_cp_sum^2 - 1/(n-i) * after_cp_sum^2)
+    
+    post_prob = weight * exp(x)
+    post_probs_arr = append(post_probs_arr, post_prob)
+  }
+  
+  post_probs_arr <- post_probs_arr / sum(post_probs_arr)
+  
+  return(post_probs_arr)
+}
+
+plot_temp_cp <- function(lake_data, correlation, vari) {
+  
+  min_temp = min(lake_data$tempWint)
+  max_temp = max(lake_data$tempWint)
+  scale = max_temp - min_temp
+  
+  df<-as.data.frame(lake_data)
+  df$tempWint = df$tempWint - min_temp #scale histogram to be at bottom
+  
+  cp_post = find_cont_cp_post(lake_data$tempWint, vari)
+  
+  cp_post_df = data.frame(cbind(lake_data$year, cp_post))
+  variance = var(cp_post)
+  #+ labs(title = paste("Correlation: ", correlation, ", Variance: ", vari, ".00", sep ="")) 
+  plot1 <- ggplot(data=df, aes(x=year, y = tempWint)) + theme_bw() + geom_point(size=3) + ylab('Mean Winter Temp') + xlab('Year') + scale_y_continuous(labels =c("     "), breaks = (0)) + theme( axis.title.y=element_blank(),axis.title.x=element_blank(), axis.text.x=element_blank(), text = element_text(size = 34), panel.border = element_rect(fill=NA, size=1.5, linetype="solid"),plot.margin = margin(15, 15, 0, 15))+ coord_cartesian(clip = "off")
+  
+  plot2 <- ggplot(data=cp_post_df, aes(x=V1, y = cp_post)) + theme_bw() + geom_line(col ='#F0AF93', size=3)  + ylab('CP Prob') + xlab('Year') + scale_y_continuous(limits=c(-0.05, .6), breaks = 0.5*(0:1), expand = c(0, 0))  + scale_x_continuous(breaks = c(1940, 1975, 2010)) + theme(text = element_text(size = 34), axis.title.y=element_blank(),  panel.border = element_rect(fill=NA, size=1.5, linetype="solid"),plot.margin = margin(15, 15, 0, 15), axis.text.x = element_text(margin = margin(15,0,0,0)))+ coord_cartesian(clip = "off")
+  
+  
+  print(grid.arrange(plot1, plot2, nrow=2, heights=c(0.5, 0.5)))
+  return(list(cp_post, variance))
+
+}
+```
+
+# offline changepoint detection - read generated data from file directory
+```{r}
+file_path_bin = "simulated_binary_and_continuous_data/binary"
+file_path_cont = "simulated_binary_and_continuous_data/continuous"
+
+entropy_arr_bin = c()
+entropy_arr_cont = c()
+
+for (file in list.files(file_path_bin)) {
+  # get posterior CP probability of binary data
+  load(paste(file_path_bin, "/", file, sep = ""))
+  corr = cor(lake_data$year, lake_data$freeze)
+  ocp_bin_fit = plot_bin_cp(lake_data, corr)
+  post_probs = ocp_bin_fit[[1]]
+  
+  # compute entropy of binary data
+  entropy = get_entropy(post_probs)
+  entropy_arr_bin = append(entropy_arr_bin, entropy)
+}
+
+for (file in list.files(file_path_cont)) {
+  # get posterior CP probability of continuous data
+  load(paste(file_path_cont, "/", file, sep = ""))
+  corr = cor(lake_data$year, lake_data$tempWint)
+  ocp_cont_fit = plot_temp_cp(lake_data, corr, target_sd^2)
+  post_probs = ocp_cont_fit[[1]]
+  
+  # compute entropy of continuous data
+  entropy = get_entropy(post_probs)
+  entropy_arr_cont = append(entropy_arr_cont, entropy)
+}
+
+print("Binary CP entropy: ")
+print(entropy_arr_bin)
+print(mean(entropy_arr_bin))
+print("Continuous CP entropy: ")
+print(entropy_arr_cont)
+print(mean(entropy_arr_cont))
+print(t.test(entropy_arr_bin, entropy_arr_cont, paired = TRUE))
+
+```
+
+
+# test the CP odds procedure with continuous and binary data - sanity check
+# test the continuous CPD algorithm - sanity check
+```{r}
+# generate gaussian data with no changepoint 
+test_data = c(rnorm(40, mean=0, sd=1))
+year = seq(40)
+correlation = cor(year, test_data)
+df = cbind(as.data.frame(year), as.data.frame(test_data))
+colnames(df) <- c('year','tempWint') 
+cont_fit = plot_temp_cp(df, correlation, 1)
+
+# generate gaussian data with changepoint at x = 20
+test_data = c(rnorm(20, mean=0, sd=1), rnorm(20, mean = 2, sd = 1))
+year = seq(40)
+correlation = cor(year, test_data)
+df = cbind(as.data.frame(year), as.data.frame(test_data))
+colnames(df) <- c('year','tempWint') 
+cont_fit = plot_temp_cp(df, correlation, 1)
+```
+
+# test the continuous CPD algorithm - sanity check
+```{r}
+# generate bernoulli data with no changepoint 
+test_data = c(rbinom(40, size = 1, prob = 0.5))
+year = seq(40)
+correlation = cor(year, test_data)
+df = cbind(as.data.frame(year), as.data.frame(test_data))
+colnames(df) <- c('year','freeze') 
+bin_fit = plot_bin_cp(df, correlation)
+
+# generate bernoulli data with changepoint at x = 20
+test_data = c(rbinom(20, size = 1, prob = 0.2), rbinom(20, size = 1, prob = 0.8))
+year = seq(40)
+correlation = cor(year, test_data)
+df = cbind(as.data.frame(year), as.data.frame(test_data))
+colnames(df) <- c('year','freeze') 
+bin_fit = plot_bin_cp(df, correlation)
+```

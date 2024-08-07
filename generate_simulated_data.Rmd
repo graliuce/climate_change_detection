@@ -1,0 +1,210 @@
+
+# load packages
+```{r}
+library(tidyverse)
+library(gamlss)
+library(pscl)
+library(data.table)
+
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(zoo)
+library(lsr)
+library(epitools)
+library(magick)
+```
+
+
+# function for process freeze and temperature data
+```{r}
+
+process_data <- function(lakename, freezedata, tempFile) {
+  temp.data <- read.csv(tempFile)
+  names(temp.data)[names(temp.data) == "time"] <- "year"
+  # we chose 1939 as the cutoff because it is when the shortest time series (vattern) starts
+  temp.data <- temp.data[which(temp.data$year >= 1939 & temp.data$year <= 2019),]
+  
+  year <- freezedata[ which(freezedata$lakename==lakename),2]
+  freeze <- freezedata[freezedata$lakename==lakename,3]
+  freezeData <- as.data.frame(cbind(year, freeze))
+  freezeData <- freezeData[which(freezeData$year >= 1939 & freezeData$year <= 2019),]
+  
+  #merge freeze and temperature data to drop missing rows
+  freezeAndTemp = merge(temp.data, freezeData)
+  freezeAndTemp = drop_na(freezeAndTemp)
+  
+  tempWint <- freezeAndTemp[,2] 
+  freeze <- freezeAndTemp[,3]
+  year <- freezeAndTemp[,1]
+    
+  return(as.data.frame(cbind(year, tempWint, freeze)))
+}
+  
+```
+
+# read lake freeze data
+```{r}
+freeze.data <-read.csv("real_lake_freeze_and_temp_data/filtered_intermittent_lakes_freeze.csv", header = T)
+freeze.data[,2] = freeze.data[,2] + 1 #shift years so that winter corresponds with January
+
+lake_info <- read.csv("real_lake_freeze_and_temp_data/updated_lake_lat_lon.csv", header = T)
+lakename_arr = lake_info$lakename
+
+```
+
+# read and process freeze and temperature data
+```{r}
+lake_data_list <- list()
+for (i in 1:length(lakename_arr)) {
+  lake_data <- process_data(lakename_arr[i], freeze.data, paste('real_lake_freeze_and_temp_data/lakes_winter_temp_data/', lakename_arr[i], ".csv", sep = ""))
+  lake_data_list <- append(lake_data_list, list(lake = data.frame(lake_data)))
+}
+
+```
+
+# function for generating binary data with given correlation
+```{r}
+
+gen_freeze_data <- function(year, target_correlation) {
+  freeze_prob_coeff = .0001
+  
+  delta = 0.05 #adjustment for overshoot
+  
+  curr_correlation = 0
+  x_values = c(1:length(year))
+  
+  while (curr_correlation <= target_correlation - delta) {
+    freeze_prob_coeff = freeze_prob_coeff + 0.0001
+    freeze_prob_arr = freeze_prob_coeff * x_values
+    intercept = .5-freeze_prob_coeff*length(year)/2 # adjust so that 0.5 prob of freeze at halfway point
+    freeze_prob_arr = freeze_prob_arr + intercept
+    
+    sim_freeze_data = c()
+    
+    sim_freeze_data = rbinom(length(x_values), 1, freeze_prob_arr)
+    
+    curr_correlation = cor(sim_freeze_data, year)
+    if (sum(sim_freeze_data) == 0) {
+      curr_correlation = 0
+    }
+  }
+  return(list("freeze_data" = +(!sim_freeze_data), "corr" = curr_correlation, "theta" = freeze_prob_arr)) #flip 0s and 1s
+}
+```
+
+# function for generating continuous data with given correlation
+```{r}
+# Source: https://stats.stackexchange.com/questions/15011/generate-a-random-variable-with-a-defined-correlation-to-an-existing-variables
+complement <- function(y, rho, x) {
+  if (missing(x)) x <- rnorm(length(y)) 
+  y.perp <- residuals(lm(x ~ y))
+  return(rho * sd(y.perp) * y + y.perp * sd(y) * sqrt(1 - rho^2))
+}
+
+gen_temp_data <- function(year, target_mean, target_sd, target_correlation) {
+  
+  x_values = c(1:length(temp_data))
+  target_var <-target_sd*target_sd
+  noise = rnorm(length(temp_data), target_mean, target_var)
+  print(target_mean)
+  a = target_correlation/sqrt(1-target_correlation**2)
+  
+  generated_data = complement(year, target_correlation, noise)
+  m <- lm(generated_data ~ year)
+  slope <- coef(m)[2]
+  
+  # standardize and scale to target mean and sd given by average temperature 
+  # surrounding real intermittently freezing lakes
+  generated_data = (generated_data - mean(generated_data))/sd(generated_data)
+  generated_data = target_sd*generated_data + target_mean
+  
+  
+  return(generated_data)
+}
+```
+
+# Get stats for generating temp data with the same mean and standard deviation as the actual temperature data
+```{r}
+temp_data_arr = c()
+temp_data_noise_arr = c()
+for(i in 1:length(lake_data_list)) {
+  temp_data = lake_data_list[[i]][['tempWint']]
+  year = lake_data_list[[i]][['year']]
+  m = lm(temp_data~year)
+  
+  temp_data_arr = append(temp_data_arr, temp_data)
+  temp_data_noise_arr = append(temp_data_noise_arr, m$residuals) # use standard deviation of the residuals
+}
+
+target_mean = mean(temp_data_arr)
+target_sd = sd(temp_data_noise_arr)
+```
+
+# Generate binary and continuous data within correlation ranges
+```{r}
+corr_groups = c(0.2, 0.3, 0.4, 0.5, 0.6)
+NUM_PLOTS_PER_GROUP <- 10
+year = seq(70) + 1940 
+
+for(corr_group in corr_groups) {
+  corr_sum = 0
+  num_valid = 0
+  while (num_valid < NUM_PLOTS_PER_GROUP) {
+    
+    target_corr = runif(1, min = corr_group, max = corr_group+0.1)
+    data = gen_freeze_data(year, target_corr)
+    freeze_data = data$freeze_data
+    corr = data$corr
+    
+    if (corr < corr_group || corr > corr_group + 0.1) {
+      next
+    }
+    num_valid = num_valid + 1
+    print(corr)
+    corr_sum = corr_sum + corr
+    
+    lake_data = cbind(year, freeze_data)
+    colnames(lake_data) <- c("year", "freeze")
+    lake_data = data.frame(lake_data)
+    
+    filename = paste("simulated_binary_and_continuous_data/binary/binary", corr, ".Rda", sep = "_")
+    save(lake_data, file=filename)
+    
+    plot <- ggplot(lake_data) + theme_bw() +
+      geom_point(aes(x=year, y=freeze), size = 1.5) + 
+      labs(x = "", y = "", colour = '', title = 'History of Lake Freeze in Townsville') +
+      theme(legend.position = "none") + 
+      scale_y_continuous(breaks=c(0,1), labels=c("No Freeze", "Freeze")) + theme(text = element_text(size=16)) + theme(axis.text.y = element_text(size = 16)) + theme(axis.text.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0), angle = 90, vjust = 0, hjust=c(.2, .8)), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) # x-axis labels are removed because CPD experiment sliders have year labels, years can be added back for change perception experiment
+  
+    print(plot)
+    
+    generated_data = gen_temp_data(year, target_mean, target_sd, corr)
+    lake_data = cbind(year, generated_data)
+    colnames(lake_data) <- c("year", "tempWint")
+    lake_data = data.frame(lake_data)
+    
+    filename = paste("simulated_binary_and_continuous_data/continuous/continuous", corr, ".Rda", sep = "_")
+    save(lake_data, file=filename)
+    
+    plot <- ggplot(lake_data) + theme_bw() +
+      geom_point(aes(x=year, y=tempWint*(9/5) + 32), size = 1.5) + 
+      labs(x = "", y = "Mean Winter Temp (\u00B0F)", title = 'History of Average Winter Temperature in Townsville') +
+      theme(text = element_text(size=16), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + coord_cartesian(clip = "off") # x-axis labels are removed because CPD experiment sliders have year labels, years can be added back for change perception experiment
+    
+    print(plot)
+  }
+  print("Avg corr:")
+  print(corr_sum / NUM_PLOTS_PER_GROUP)
+}
+```
+
+
+
+
