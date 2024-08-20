@@ -164,9 +164,11 @@ for (file in list.files(file_path_cont)) {
 print("Binary CP entropy: ")
 print(entropy_arr_bin)
 print(mean(entropy_arr_bin))
+print(sd(entropy_arr_bin))
 print("Continuous CP entropy: ")
 print(entropy_arr_cont)
 print(mean(entropy_arr_cont))
+print(sd(entropy_arr_cont))
 print(t.test(entropy_arr_bin, entropy_arr_cont, paired = TRUE))
 
 ```
